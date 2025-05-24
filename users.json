@@ -1,0 +1,76 @@
+{
+  "mukul": {
+    "family_members": [
+      {
+        "name": "aarti",
+        "recordings": [
+          "family_voice_data\\mukul\\aarti\\sample_1_20250521_181647.wav",
+          "family_voice_data\\mukul\\aarti\\sample_2_20250521_181655.wav",
+          "family_voice_data\\mukul\\aarti\\sample_3_20250521_181705.wav"
+        ]
+      },
+      {
+        "name": "mukul",
+        "recordings": [
+          "family_voice_data\\mukul\\mukul\\sample_1_20250521_181758.wav",
+          "family_voice_data\\mukul\\mukul\\sample_2_20250521_181805.wav",
+          "family_voice_data\\mukul\\mukul\\sample_3_20250521_181813.wav",
+          "family_voice_data\\mukul\\mukul\\sample_4_20250521_181821.wav",
+          "family_voice_data\\mukul\\mukul\\sample_5_20250521_181829.wav"
+        ]
+      }
+    ]
+  },
+  "mukul2": {
+    "family_members": [
+      {
+        "name": "aarti",
+        "recordings": [
+          "family_voice_data\\mukul2\\aarti\\sample_1_20250521_184151.wav",
+          "family_voice_data\\mukul2\\aarti\\sample_2_20250521_184158.wav",
+          "family_voice_data\\mukul2\\aarti\\sample_3_20250521_184204.wav"
+        ]
+      },
+      {
+        "name": "mukul",
+        "recordings": [
+          "family_voice_data\\mukul2\\mukul\\sample_1_20250521_184342.wav",
+          "family_voice_data\\mukul2\\mukul\\sample_2_20250521_184349.wav",
+          "family_voice_data\\mukul2\\mukul\\sample_3_20250521_184357.wav",
+          "family_voice_data\\mukul2\\mukul\\sample_4_20250521_184406.wav"
+        ]
+      },
+      {
+        "name": "durv",
+        "recordings": [
+          "family_voice_data\\mukul2\\durv\\sample_1_20250521_184250.wav",
+          "family_voice_data\\mukul2\\durv\\sample_2_20250521_184258.wav",
+          "family_voice_data\\mukul2\\durv\\sample_3_20250521_184308.wav",
+          "family_voice_data\\mukul2\\durv\\sample_4_20250521_184316.wav",
+          "family_voice_data\\mukul2\\durv\\sample_5_20250521_184323.wav"
+        ]
+      }
+    ],
+    "settings": {
+      "confidence_threshold": 0.4,
+      "vad_threshold": 0.01
+    }
+  },
+  "mukul3": {
+    "family_members": [
+      {
+        "name": "gurav",
+        "recordings": [
+          "family_voice_data\\mukul3\\gurav\\sample_1_20250521_184839.wav",
+          "family_voice_data\\mukul3\\gurav\\sample_2_20250521_184855.wav",
+          "family_voice_data\\mukul3\\gurav\\sample_3_20250521_184906.wav",
+          "family_voice_data\\mukul3\\gurav\\sample_4_20250521_184915.wav"
+        ]
+      },
+      {
+        "name": "durav",
+        "recordings": []
+      }
+    ]
+  }
+}
