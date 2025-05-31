@@ -23,7 +23,7 @@ HOP_SIZE = 256
 SAMPLE_RATE = 16000
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SILENCE_THRESHOLD = 0.02
-MODEL_PATH = "family_voice_model.pth"
+MODEL_PATH = "mukul2_model.pth"
 
 # Neural Network Model (same as training)
 class SpeakerRecognitionModel(nn.Module):

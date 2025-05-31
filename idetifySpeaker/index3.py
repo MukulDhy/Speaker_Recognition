@@ -8,6 +8,7 @@ import wave
 import pickle
 import librosa
 import soundfile as sf
+import shutil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,7 +20,8 @@ from pydub import AudioSegment
 from pydub.silence import split_on_silence
 import queue
 import concurrent.futures
-
+import noisereduce as nr  # Added for noise reduction
+import resampy
 # Constants with optimized values
 CHUNK = 1024
 FORMAT = pyaudio.paInt16
@@ -93,6 +95,8 @@ class SpectralFeatureExtractor:
         self.hop_length = HOP_SIZE
         self.cache = {}
         self.load_cache()
+        self.min_silence_len = 500  # Minimum silence length to split on (ms)
+        self.silence_thresh = -40   # Silence threshold in dB
         
     def load_cache(self):
         """Load feature cache from disk"""
@@ -122,40 +126,53 @@ class SpectralFeatureExtractor:
             print(f"Error saving cache: {e}")
         
     def extract_features(self, audio_path):
-        """Extract features with caching for improved performance"""
+        """Extract features with caching for improved performance and silence trimming"""
         # Check cache first
         if audio_path in self.cache:
             return self.cache[audio_path]
         
-        # Load audio file
         try:
-            y, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True, res_type='kaiser_fast')  # Faster loading
-        except Exception as e:
-            print(f"Error loading audio file {audio_path}: {e}")
-            return None
-        
-        # Remove silent parts
-        y = self._remove_silence(y)
-        
-        if len(y) == 0:  # If no sound was detected
-            return None
-        
-        try:
-            # Extract features in parallel
+            # Load audio file with librosa (faster than pydub)
+            y, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True, res_type='kaiser_fast')
+            
+            # First pass: detect and trim silence
+            trimmed_audio = self._trim_silence(y, sr)
+            
+            if len(trimmed_audio) == 0:
+                print(f"Warning: Audio file {audio_path} is completely silent after trimming.")
+                return None
+                
+            # Second pass: apply noise reduction
+            cleaned_audio = self._reduce_noise(trimmed_audio, sr)
+            
+            # Third pass: final silence trimming after noise reduction
+            final_audio = self._trim_silence(cleaned_audio, sr)
+            
+            if len(final_audio) == 0:
+                print(f"Warning: Audio file {audio_path} is completely silent after noise reduction.")
+                return None
+                
+            # Save trimmed version for debugging/inspection
+            self._save_trimmed_version(audio_path, final_audio, sr)
+            
+            # Extract features from cleaned audio
             features = []
             
             # Extract MFCCs (primary feature)
-            mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=self.n_mfcc, n_fft=self.n_fft, hop_length=self.hop_length)
+            mfccs = librosa.feature.mfcc(y=final_audio, sr=sr, n_mfcc=self.n_mfcc, 
+                                       n_fft=self.n_fft, hop_length=self.hop_length)
             features.append(np.mean(mfccs, axis=1))
             features.append(np.std(mfccs, axis=1))
             
-            # For real-time performance, we'll limit additional features
             # Extract efficient spectral features
-            spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=self.n_fft, hop_length=self.hop_length)
+            spectral_centroid = librosa.feature.spectral_centroid(y=final_audio, sr=sr, 
+                                                                n_fft=self.n_fft, 
+                                                                hop_length=self.hop_length)
             features.append(np.mean(spectral_centroid, axis=1))
             
             # Zero crossing rate (efficient temporal feature)
-            zero_crossing_rate = librosa.feature.zero_crossing_rate(y, hop_length=self.hop_length)
+            zero_crossing_rate = librosa.feature.zero_crossing_rate(final_audio, 
+                                                                  hop_length=self.hop_length)
             features.append(np.mean(zero_crossing_rate, axis=1))
             
             # Flatten and concatenate all features
@@ -164,16 +181,85 @@ class SpectralFeatureExtractor:
             # Cache the result
             self.cache[audio_path] = combined_features
             
-            # Periodically save cache (not every time to avoid I/O overhead)
+            # Periodically save cache
             if len(self.cache) % 10 == 0:
                 executor.submit(self.save_cache)
                 
             return combined_features
             
         except Exception as e:
-            print(f"Error extracting features: {e}")
+            print(f"Error processing audio file {audio_path}: {e}")
             return None
     
+    def _trim_silence(self, y, sr):
+        """Trim silence from beginning and end of audio using librosa"""
+        # Use librosa's trim function with top_db parameter
+        y_trimmed, _ = librosa.effects.trim(y, top_db=30, frame_length=1024, hop_length=256)
+        
+        # Additional processing to remove long silent pauses within the audio
+        non_silent_intervals = librosa.effects.split(y_trimmed, 
+                                                    top_db=25, 
+                                                    frame_length=1024, 
+                                                    hop_length=256)
+        
+        # Combine non-silent intervals with small padding
+        padded_intervals = []
+        for start, end in non_silent_intervals:
+            # Add 50ms padding to each side of the non-silent interval
+            pad_samples = int(0.05 * sr)
+            start = max(0, start - pad_samples)
+            end = min(len(y_trimmed), end + pad_samples)
+            padded_intervals.append((start, end))
+            
+        # If we found non-silent intervals, combine them
+        if padded_intervals:
+            # Sort intervals by start time
+            padded_intervals.sort()
+            
+            # Combine consecutive intervals that are close to each other
+            combined = [list(padded_intervals[0])]
+            for current in padded_intervals[1:]:
+                last = combined[-1]
+                # If intervals are within 200ms of each other, merge them
+                if current[0] - last[1] < int(0.2 * sr):
+                    last[1] = current[1]
+                else:
+                    combined.append(list(current))
+            
+            # Extract audio from combined intervals
+            segments = [y_trimmed[start:end] for start, end in combined]
+            if segments:
+                return np.concatenate(segments)
+        
+        return y_trimmed
+    
+    def _reduce_noise(self, y, sr):
+        """Apply noise reduction to audio"""
+        try:
+            # Use noisereduce library for effective noise reduction
+            # First estimate the noise profile from the first 100ms (assuming it contains noise)
+            noise_sample = y[:int(0.1 * sr)]
+            reduced_noise = nr.reduce_noise(y=y, sr=sr, y_noise=noise_sample, prop_decrease=0.8)
+            return reduced_noise
+        except Exception as e:
+            print(f"Error in noise reduction: {e}")
+            return y
+    
+    def _save_trimmed_version(self, original_path, y, sr):
+        """Save trimmed version of audio for inspection"""
+        try:
+            # Create trimmed versions directory if it doesn't exist
+            trimmed_dir = os.path.join(os.path.dirname(original_path), "trimmed_versions")
+            os.makedirs(trimmed_dir, exist_ok=True)
+            
+            # Save trimmed version
+            filename = os.path.basename(original_path)
+            trimmed_path = os.path.join(trimmed_dir, f"trimmed_{filename}")
+            
+            sf.write(trimmed_path, y, sr)
+        except Exception as e:
+            print(f"Could not save trimmed version: {e}")
+            
     def _remove_silence(self, y, threshold=SILENCE_THRESHOLD):
         """More efficient silence removal"""
         # Calculate amplitude envelope using RMS
@@ -442,50 +528,78 @@ class SpeakerRecognitionSystem:
         
         return save_path
     
-    def record_family_voice_samples(self, member_name, num_samples=3):
-        """Record multiple voice samples for a family member with improved guidance"""
+    def record_family_voice_samples(self, member_name, num_samples=3, existing_samples_path=""):
+        
         if not self.active_user:
             print("No active user. Please select or register a user first.")
             return False
-            
+
         # Check if member exists
         found = False
         for member in self.users[self.active_user]["family_members"]:
             if member["name"] == member_name:
                 found = True
                 break
-                
+
         if not found:
             print(f"Family member {member_name} not found.")
             return False
-        
-        print(f"Recording {num_samples} voice samples for {member_name}")
-        print("Tips for good voice samples:")
-        print("- Speak naturally at a normal pace")
-        print("- Include different sentences for each sample")
-        print("- Try to maintain a consistent distance from the microphone")
-        print("- Minimize background noise")
-        
-        for i in range(num_samples):
-            print(f"\nSample {i+1}/{num_samples}")
-            input("Press Enter to start recording...")
-            
-            # Create directory for member if it doesn't exist
+
+        if existing_samples_path:
+            # Use existing samples
+            if not os.path.isdir(existing_samples_path):
+                print(f"Provided path is not a valid directory: {existing_samples_path}")
+                return False
+
+            # Get all WAV files from the directory
+            existing_files = [f for f in os.listdir(existing_samples_path) 
+                             if f.lower().endswith('.wav')]
+
+            if not existing_files:
+                print(f"No WAV files found in the provided directory: {existing_samples_path}")
+                return False
+
+            # Create member directory in user's data folder
             member_dir = os.path.join(DATA_DIR, self.active_user, member_name)
             os.makedirs(member_dir, exist_ok=True)
-            
-            # Record and save sample
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_path = os.path.join(member_dir, f"sample_{i+1}_{timestamp}.wav")
-            self.record_audio(member_name, duration=5, save_path=file_path)
-            
-            # Give user time to prepare for next sample
-            if i < num_samples - 1:
-                print("Great! Let's continue to the next sample.")
-                time.sleep(1)
-        
-        print(f"Completed recording {num_samples} samples for {member_name}")
-        return True
+
+            # Copy existing files to member directory
+            for file in existing_files:
+                src = os.path.join(existing_samples_path, file)
+                dst = os.path.join(member_dir, file)
+                shutil.copy2(src, dst)
+
+            print(f"Successfully imported {len(existing_files)} voice samples for {member_name}")
+            return True
+        else:
+            # Record new samples
+            print(f"Recording {num_samples} voice samples for {member_name}")
+            print("Tips for good voice samples:")
+            print("- Speak naturally at a normal pace")
+            print("- Include different sentences for each sample")
+            print("- Try to maintain a consistent distance from the microphone")
+            print("- Minimize background noise")
+
+            for i in range(num_samples):
+                print(f"\nSample {i+1}/{num_samples}")
+                input("Press Enter to start recording...")
+
+                # Create directory for member if it doesn't exist
+                member_dir = os.path.join(DATA_DIR, self.active_user, member_name)
+                os.makedirs(member_dir, exist_ok=True)
+
+                # Record and save sample
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                file_path = os.path.join(member_dir, f"sample_{i+1}_{timestamp}.wav")
+                self.record_audio(member_name, duration=5, save_path=file_path)
+
+                # Give user time to prepare for next sample
+                if i < num_samples - 1:
+                    print("Great! Let's continue to the next sample.")
+                    time.sleep(1)
+
+            print(f"Completed recording {num_samples} samples for {member_name}")
+            return True
     
     def extract_features_for_training(self):
         """Extract features from all recordings for training with parallel processing"""
@@ -728,7 +842,7 @@ class SpeakerRecognitionSystem:
         return True
     
     def identify_speaker(self, audio_path=None, use_cache=True):
-        """Identify the speaker in the recorded audio with caching"""
+        """Identify the speaker in the recorded audio with caching and silence detection"""
         if not self.active_user:
             print("No active user selected.")
             return None
@@ -750,13 +864,17 @@ class SpeakerRecognitionSystem:
         
         start_time = time.time()
         
-        # Extract features
+        # First check if audio contains any speech
+        if not self._contains_speech(audio_path):
+            print("No speech detected in audio.")
+            return ("UNKNOWN SPEAKER", 0.0)
+        
         # Extract features
         feature_vector = self.feature_extractor.extract_features(audio_path)
         
         if feature_vector is None:
             print("Could not extract features from the audio.")
-            return None
+            return ("UNKNOWN SPEAKER", 0.0)
             
         # Convert to tensor and make prediction
         feature_tensor = torch.FloatTensor(feature_vector).to(DEVICE)
@@ -786,11 +904,31 @@ class SpeakerRecognitionSystem:
         
         if confidence < self.confidence_threshold:
             print(f"Speaker identification uncertain (confidence: {confidence:.2f})")
-            return None
+            return ("UNKNOWN SPEAKER", confidence)
             
         print(f"Identified speaker: {predicted_speaker} (confidence: {confidence:.2f}, processing time: {processing_time:.3f}s, avg: {avg_processing_time:.3f}s)")
         return predicted_speaker, confidence
     
+    def _contains_speech(self, audio_path, threshold=0.5):
+        """Check if audio contains any speech above threshold"""
+        try:
+            # Load audio file
+            y, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
+            
+            # Calculate short-term energy
+            energy = librosa.feature.rms(y=y, frame_length=1024, hop_length=512)[0]
+            
+            # Normalize energy
+            if len(energy) > 0:
+                energy = energy / np.max(energy)
+            
+            # Check if any frames exceed threshold
+            return np.any(energy > threshold)
+            
+        except Exception as e:
+            print(f"Error checking for speech in {audio_path}: {e}")
+            return False
+
     def start_real_time_recognition(self, window_size=1.0, step_size=0.5):
         """Start real-time speaker recognition with optimized performance"""
         if not self.active_user:
